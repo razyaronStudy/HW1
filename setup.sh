@@ -34,7 +34,7 @@ aws ec2 authorize-security-group-ingress        \
 
 UBUNTU_22_04_AMI="ami-053b0d53c279acc90"
 
-echo "Creating Ubuntu 20.04 instance..."
+echo "Creating Ubuntu 22.04 instance..."
 RUN_INSTANCES=$(aws ec2 run-instances   \
     --image-id $UBUNTU_22_04_AMI        \
     --instance-type t2.micro            \
@@ -70,6 +70,7 @@ echo "setup production environment"
 ssh -i $KEY_PEM -o "StrictHostKeyChecking=no" -o "ConnectionAttempts=10" ubuntu@$PUBLIC_IP <<EOF
     # Install dependencies (assuming Ubuntu)
     sudo apt-get update
+    sudo apt-get install jq
     sudo apt-get install -y python3 python3-pip
 
     # Install Flask
