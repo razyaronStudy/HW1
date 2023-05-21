@@ -1,31 +1,73 @@
 #!/bin/bash
 
-# Set variables
-AMI="ami-024e6efaf93d85776"  # Updated AMI ID
-INSTANCE_TYPE="t2.micro"
-SECURITY_GROUP_NAME="my-security-group"
-KEY_PAIR_NAME="my-key-pair"
-VOLUME_SIZE=16
-VOLUME_TYPE="gp3"
+KEY_NAME="Raz-Lotem-HW1-`date +'%N'`"
+KEY_PEM="$KEY_NAME.pem"
 
-# Create security group
-aws ec2 create-security-group --group-name $SECURITY_GROUP_NAME --description "My security group"
-aws ec2 authorize-security-group-ingress --group-name $SECURITY_GROUP_NAME --protocol tcp --port 22 --cidr 0.0.0.0/0
+echo "create key pair $KEY_PEM to connect to instances and save locally"
+aws ec2 create-key-pair --key-name $KEY_NAME \
+    | jq -r ".KeyMaterial" > $KEY_PEM
 
-# Launch EC2 instance
-INSTANCE_ID=$(aws ec2 run-instances --image-id $AMI --instance-type $INSTANCE_TYPE --security-groups $SECURITY_GROUP_NAME --key-name $KEY_PAIR_NAME --block-device-mappings DeviceName=/dev/sda1,Ebs={VolumeSize=$VOLUME_SIZE,VolumeType=$VOLUME_TYPE} | grep "InstanceId" | awk -F'"' '{print $4}')
+# secure the key pair
+chmod 400 $KEY_PEM
 
-# Wait for instance to be running
+SEC_GRP="Raz-Lotem-sg-`date +'%N'`"
+
+echo "setup firewall $SEC_GRP"
+aws ec2 create-security-group   \
+    --group-name $SEC_GRP       \
+    --description "Access my instances" 
+
+# figure out my ip
+MY_IP=$(curl ipinfo.io/ip)
+echo "My IP: $MY_IP"
+
+
+echo "setup rule allowing SSH access to $MY_IP only"
+aws ec2 authorize-security-group-ingress        \
+    --group-name $SEC_GRP --port 22 --protocol tcp \
+    --cidr $MY_IP/32
+
+echo "setup rule allowing HTTP (port 5000) access to $MY_IP only"
+aws ec2 authorize-security-group-ingress        \
+    --group-name $SEC_GRP --port 5000 --protocol tcp \
+    --cidr $MY_IP/32
+
+UBUNTU_22_04_AMI="ami-053b0d53c279acc90"
+
+echo "Creating Ubuntu 20.04 instance..."
+RUN_INSTANCES=$(aws ec2 run-instances   \
+    --image-id $UBUNTU_22_04_AMI        \
+    --instance-type t2.micro            \
+    --key-name $KEY_NAME                \
+    --security-groups $SEC_GRP         \
+    --block-device-mappings '[
+        {
+            "DeviceName": "/dev/xvda",
+            "Ebs": {
+                "VolumeSize": 16,
+                "VolumeType": "gp3"
+            }
+        }
+    ]'
+)
+
+INSTANCE_ID=$(echo $RUN_INSTANCES | jq -r '.Instances[1].InstanceId')
+
+echo "Waiting for instance creation..."
 aws ec2 wait instance-running --instance-ids $INSTANCE_ID
 
-# Get public IP address of the instance
-PUBLIC_IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+PUBLIC_IP=$(aws ec2 describe-instances  --instance-ids $INSTANCE_ID | 
+    jq -r '.Reservations[0].Instances[1].PublicIpAddress'
+)
 
-# Copy code to the instance
-scp -i ~/.ssh/my-key-pair.pem parking_lot.py ubuntu@$PUBLIC_IP:/home/ubuntu/
+echo "New instance $INSTANCE_ID @ $PUBLIC_IP"
+
+echo "deploying code to production"
+scp -i $KEY_PEM -o "StrictHostKeyChecking=no" -o "ConnectionAttempts=60" app.py ubuntu@$PUBLIC_IP:/home/ubuntu/
 
 # Connect to the instance and execute commands
-ssh -i ~/.ssh/my-key-pair.pem ubuntu@$PUBLIC_IP << EOF
+echo "setup production environment"
+ssh -i $KEY_PEM -o "StrictHostKeyChecking=no" -o "ConnectionAttempts=10" ubuntu@$PUBLIC_IP <<EOF
     # Install dependencies (assuming Ubuntu)
     sudo apt-get update
     sudo apt-get install -y python3 python3-pip
@@ -35,11 +77,10 @@ ssh -i ~/.ssh/my-key-pair.pem ubuntu@$PUBLIC_IP << EOF
 
     # Run the Python code
     python3 /home/ubuntu/parking_lot.py
+    exit
 EOF
 
-# Print instructions for executing the code
-echo "The code has been deployed to the EC2 instance."
-echo "To access the instance, use the following command:"
-echo "ssh -i ~/.ssh/my-key-pair.pem ubuntu@$PUBLIC_IP"
-echo "Once connected to the instance, you can run the code by executing the following command:"
-echo "python3 /home/ubuntu/parking_lot.py"
+echo "test that it all worked"
+curl  --retry-connrefused --retry 10 --retry-delay 1  http://$PUBLIC_IP:5000
+
+
